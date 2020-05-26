@@ -37,12 +37,13 @@ static struct fid_domain	*domain;
 static struct fid_av		*av;
 static struct fid_ep		*ep;
 static struct fid_cq		*cq;
-static fi_addr_t		peer_addr;
+static fi_addr_t*		    peer_addr;
 static struct fi_context	sctxt;
 static struct fi_context	rctxt;
 static char			sbuf[64];
 static char			rbuf[64];
 static char			tempbuf[64];
+static int          count=0;
 
 static void get_peer_addr(void *peer_name)
 {
@@ -186,6 +187,23 @@ static void twait_cq(void)
 	}
 }
 
+static void wait(int n)
+{
+    struct fi_cq_tagged_entry entry;
+    int ret, completed = 0;
+
+	while (!completed) {
+		ret = fi_cq_read(cq, &entry, n);
+
+        if (ret == -FI_EAGAIN)
+            continue;
+
+		CHK_ERR("fi_cq_read", (ret<0), ret);
+		completed += ret;
+	}
+    
+}
+
 static void send_one(int size)
 {
 	int err;
@@ -212,7 +230,7 @@ static void recv_multi(int size, int n)
 	for (int i = 0; i < n; i++)
 	{
 		err = fi_recv(ep, rbuf, size, NULL, FI_ADDR_UNSPEC, &rctxt);
-		wait_cq();
+		wait(n);
 
 		printf("Received '%s'\n", rbuf);
 	}
@@ -234,6 +252,7 @@ static void trecv_multi(int size, uint64_t tag, int n)
 
 static void tsend_one(int size, uint64_t tag)
 {
+    printf("Sending %s to tag %llu\n", sbuf, tag);
 	int err;
 
 	err = fi_tsend(ep, sbuf, size, NULL, peer_addr, tag, &sctxt);
@@ -257,7 +276,7 @@ int main(int argc, char *argv[])	/*TODO: use tagged and untagged messages and se
 	char *server = NULL;
 	int size = 64;
 	int terms = 0;
-	int client_num;
+	int client_num, num_clients;
 
 	if (argc > 1) {
 		is_client = 1;
@@ -267,7 +286,6 @@ int main(int argc, char *argv[])	/*TODO: use tagged and untagged messages and se
 
 	init_fabric(server);
 	size_t addrlen = 64;
-	char buf[64];
 	size_t len = 64;
 	int err;
 	uint64_t tags[] = {MSG_TAG1, MSG_TAG2, MSG_TAG3, MSG_TAG4};
@@ -276,53 +294,47 @@ int main(int argc, char *argv[])	/*TODO: use tagged and untagged messages and se
 
 	if (is_client) {
 		fi_getname(&ep->fid, sbuf, &addrlen);
-		send_one(size);
+		tsend_one(size, tags[client_num]);
 	} else {
-		printf("Waiting for client to connect\n");
-		recv_one(size);
-		buf[0] = '\0';
-		fi_av_straddr(av, rbuf, buf, &len);
-		printf("Translating peer address: %s\n", buf);
-		err = fi_av_insert(av, rbuf, 1, &peer_addr, 0, NULL);
-		printf("fi_av_insert returns: %d\n", err);
+		printf("Enter number of clients: ");
+		scanf("%s", rbuf);
+		num_clients = strtol(rbuf, &ptr, 10);
+		for (int i = 0; i < num_clients; i++)
+		{
+			char buf[64];
+			printf("Waiting for client %d to connect\n", i);
+			trecv_one(size, tags[i]);
+			buf[0] = '\0';
+			fi_av_straddr(av, rbuf, buf, &len);
+			printf("Translating peer address: %s\n", buf);
+			err = fi_av_insert(av, rbuf, 1, &peer_addr, 0, NULL);
+			printf("fi_av_insert returns: %d\n", err);
+
+		}
 	}
 
 	while (1) {
 		if (is_client) {
-			printf("Enter number of messages: ");
-			scanf("%s", sbuf);
-			printf("Sending %s to server\n", sbuf);
-			send_one(size);
-			long n = strtol(sbuf, &ptr, 10);
-			for (int i = 0; i < n; i++)
-			{
-				printf("Enter message %d: ", i);
-				scanf("%s", sbuf);
-				send_one(size);
-				printf("Enter message %d (tagged): ", i);
-				scanf("%s", sbuf);
-				tsend_one(size, MSG_TAG);
-			}
-
-			printf("Waiting for server\n");
-			trecv_one(size, MSG_TAG);
+			printf("Sending client number to server\n");
+            sprintf(sbuf, "%d", client_num);
+            tsend_one(size, SV_MSG_TAG);
+            printf("Enter message to server: ");
+            scanf("%s", sbuf);
+            tsend_one(size, MSG_TAG);
+			printf("Waiting for server, tag %llu\n", tags[client_num]);
+            recv_multi(size, 4);
+            trecv_one(size, tags[client_num]);
 			printf("Received '%s' from server\n", rbuf);
 		} else {
-			recv_one(size);
-			n = strtol(rbuf, &ptr, 10);
-			printf("Waiting for messages\n");
-			recv_multi(size, n);
-			printf("Waiting for tagged messages\n");
-			trecv_multi(size, MSG_TAG, n);
-			if (strcmp(rbuf, "q") == 0) {
-				printf("Received termination message from client\n");
-				break;
-			}
-
-			printf("Enter a message: ");
-			scanf("%s", sbuf);
-			printf("Sending '%s' to client\n", sbuf);
-			tsend_one(size, MSG_TAG);
+            trecv_one(size, SV_MSG_TAG);
+            client_num = strtol(rbuf, &ptr, 10);
+            printf("Received client number %d\n", client_num);
+            trecv_one(size, MSG_TAG);
+            printf("Received message %s from client %d\n", rbuf, client_num);
+            printf("Enter reply to client %d, tag %lu: ", client_num, tags[client_num]);
+            scanf("%s", sbuf);
+            tsend_one(size, tags[client_num]);
+            send_one(size);
 		}
 	}
 	
