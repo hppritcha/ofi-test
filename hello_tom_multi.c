@@ -37,7 +37,7 @@ static struct fid_domain	*domain;
 static struct fid_av		*av;
 static struct fid_ep		*ep;
 static struct fid_cq		*cq;
-static fi_addr_t*		    peer_addr;
+static fi_addr_t		    *peer_addr;
 static struct fi_context	sctxt;
 static struct fi_context	rctxt;
 static char			sbuf[64];
@@ -55,7 +55,7 @@ static void get_peer_addr(void *peer_name)
 	fi_av_straddr(av, peer_name, buf, &len);
 	printf("Translating peer address: %s\n", buf);
 
-	err = fi_av_insert(av, peer_name, 1, &peer_addr, 0, NULL);
+	err = fi_av_insert(av, peer_name, 1, &peer_addr[0], 0, NULL);
 	printf("fi_av_insert returns: %d\n", err);
 	/*CHK_ERR("fi_av_insert", (err!=1), err);*/
 }
@@ -83,7 +83,7 @@ static void init_fabric(char *server)
         hints->fabric_attr->prov_name = strdup("UDP-IP");
 #endif
 #if 1
-        hints->fabric_attr->prov_name = strdup("sockets"); /*TODO: Test with other providers*/
+        /*hints->fabric_attr->prov_name = strdup("UDP"); TODO: Test with other providers*/
 #endif
 
 	version = FI_VERSION(1, 5);
@@ -143,6 +143,7 @@ static void finalize_fabric(void)
 	fi_close((fid_t)domain);
 	fi_close((fid_t)fabric);
 	fi_freeinfo(fi);
+	free(peer_addr);
 }
 
 static void wait_cq(void)	/*TODO: Make a wait method that waits for all receives to finish instead of just one */
@@ -204,11 +205,11 @@ static void wait(int n)
     
 }
 
-static void send_one(int size)
+static void send_one(int size, int dest)
 {
 	int err;
 
-	err = fi_send(ep, sbuf, size, NULL, peer_addr, &sctxt);
+	err = fi_send(ep, sbuf, size, NULL, peer_addr[dest], &sctxt);
 
 	wait_cq();
 }
@@ -250,12 +251,12 @@ static void trecv_multi(int size, uint64_t tag, int n)
 
 }
 
-static void tsend_one(int size, uint64_t tag)
+static void tsend_one(int size, uint64_t tag, int dest)
 {
-    printf("Sending %s to tag %llu\n", sbuf, tag);
+    printf("Sending %s to tag %lu\n", sbuf, tag);
 	int err;
 
-	err = fi_tsend(ep, sbuf, size, NULL, peer_addr, tag, &sctxt);
+	err = fi_tsend(ep, sbuf, size, NULL, peer_addr[dest], tag, &sctxt);
 
 	twait_cq();
 }
@@ -278,12 +279,15 @@ int main(int argc, char *argv[])	/*TODO: use tagged and untagged messages and se
 	int terms = 0;
 	int client_num, num_clients;
 
-	if (argc > 1) {
+	if (argc > 2) {
 		is_client = 1;
 		server = argv[1];
 		client_num = (int) strtol(argv[2], (char **)NULL, 10);
+	} else {
+		num_clients = (int) strtol(argv[1], (char **)NULL, 10);
 	}
 
+	peer_addr = malloc((num_clients+1)*sizeof(fi_addr_t));
 	init_fabric(server);
 	size_t addrlen = 64;
 	size_t len = 64;
@@ -294,20 +298,17 @@ int main(int argc, char *argv[])	/*TODO: use tagged and untagged messages and se
 
 	if (is_client) {
 		fi_getname(&ep->fid, sbuf, &addrlen);
-		tsend_one(size, tags[client_num]);
+		tsend_one(size, tags[client_num-1], 0);
 	} else {
-		printf("Enter number of clients: ");
-		scanf("%s", rbuf);
-		num_clients = strtol(rbuf, &ptr, 10);
-		for (int i = 0; i < num_clients; i++)
+		for (int i = 1; i <= num_clients; i++)
 		{
 			char buf[64];
 			printf("Waiting for client %d to connect\n", i);
-			trecv_one(size, tags[i]);
+			trecv_one(size, tags[i-1]);
 			buf[0] = '\0';
 			fi_av_straddr(av, rbuf, buf, &len);
 			printf("Translating peer address: %s\n", buf);
-			err = fi_av_insert(av, rbuf, 1, &peer_addr, 0, NULL);
+			err = fi_av_insert(av, rbuf, 1, &peer_addr[i], 0, NULL);
 			printf("fi_av_insert returns: %d\n", err);
 
 		}
@@ -317,13 +318,12 @@ int main(int argc, char *argv[])	/*TODO: use tagged and untagged messages and se
 		if (is_client) {
 			printf("Sending client number to server\n");
             sprintf(sbuf, "%d", client_num);
-            tsend_one(size, SV_MSG_TAG);
+            tsend_one(size, SV_MSG_TAG, 0);
             printf("Enter message to server: ");
             scanf("%s", sbuf);
-            tsend_one(size, MSG_TAG);
-			printf("Waiting for server, tag %llu\n", tags[client_num]);
-            recv_multi(size, 4);
-            trecv_one(size, tags[client_num]);
+            tsend_one(size, MSG_TAG, 0);
+			printf("Waiting for server, tag %lu\n", tags[client_num-1]);
+            trecv_one(size, tags[client_num-1]);
 			printf("Received '%s' from server\n", rbuf);
 		} else {
             trecv_one(size, SV_MSG_TAG);
@@ -331,10 +331,9 @@ int main(int argc, char *argv[])	/*TODO: use tagged and untagged messages and se
             printf("Received client number %d\n", client_num);
             trecv_one(size, MSG_TAG);
             printf("Received message %s from client %d\n", rbuf, client_num);
-            printf("Enter reply to client %d, tag %lu: ", client_num, tags[client_num]);
+            printf("Enter reply to client %d, tag %lu: ", client_num, tags[client_num-1]);
             scanf("%s", sbuf);
-            tsend_one(size, tags[client_num]);
-            send_one(size);
+            tsend_one(size, tags[client_num-1], client_num);
 		}
 	}
 	
